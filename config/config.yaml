@@ -1,0 +1,191 @@
+# ============================================================
+# Main Configuration File
+# All tunable parameters for each pipeline step
+# ============================================================
+
+# --- Pipeline Control ---
+pipeline:
+  # Steps to run: 1=query_understanding, 2=retrieval, 3=ranking, 4=organization
+  # Run individually or combine, e.g. [1,2] or [1,2,3,4]
+  steps: [1, 2, 3, 4]
+
+  # Resume from cached intermediate results
+  use_cache: true
+  cache_dir: "cache"
+
+# --- Dataset Settings ---
+dataset:
+  # Which dataset(s) to evaluate on
+  # Options: "pasa" (RealScholarQuery), "asta" (PaperFindingBench), "both"
+  name: "pasa"
+
+  # Query filter
+  query_filter:
+    max_queries: 5           # Max queries to process (0 = all)
+    query_ids: []             # Specific query IDs (empty = all), e.g. ["RealScholarQuery_0"]
+
+    # For Asta: which query types to include
+    asta_query_types:
+      - "semantic"
+      - "specific"
+      - "metadata"
+
+  # Data paths (relative to project root = code/)
+  pasa_data_path: "data/pasa/test.jsonl"
+  asta_data_path: "data/asta/test_2025_05.json"
+  asta_val_data_path: "data/asta/validation_2025_05.json"
+  asta_normalizer_path: "data/asta/normalizer_reference.json"
+
+# --- Step 1: Query Understanding ---
+query_understanding:
+  # LLM model for query analysis
+  model: "deepseek-v4-flash"    # Options: deepseek-v4-flash, qwen3-32b, gpt-4o
+  model_provider: "deepseek" # Options: dashscope, deepseek, openai
+  temperature: 0.0
+  max_tokens: 2000
+
+  # Prompt settings
+  system_prompt: "You are an expert academic search analyst. Parse research queries into structured search plans."
+
+  # Output control
+  save_parsed_queries: true   # Save structured JSON for inspection
+
+# --- Step 2: Hybrid Retrieval ---
+retrieval:
+  # Source selection
+  sources:
+    - "semantic_scholar"
+    - "arxiv"
+    - "openalex"
+    # - "pubmed"      # Enable for biomedical queries
+    # - "dblp"        # Enable for CS venue queries
+
+  # BM25 settings
+  bm25:
+    k1: 1.5                 # BM25 term frequency saturation
+    b: 0.75                 # BM25 length normalization
+
+  # Embedding settings (local models, paths in config/.env)
+  embedding:
+    model: "all-MiniLM-L6-v2"        # Primary: 22M params, 384-dim (fast, CPU-friendly)
+    model_heavy: "qwen3-embedding-0.6b"  # Optional heavy: 0.6B params, 4096-dim
+    # Model paths configured in config/.env:
+    #   EMBEDDING_MODEL_PATH = D:\models\Qwen\Qwen3-Embedding-0.6B
+    #   EMBEDDING_MODEL_PATH_LIGHT = D:\models\all-MiniLM-L6-v2
+    device: "cpu"                    # "cpu" or "cuda"
+
+  # RRF fusion
+  fusion:
+    method: "rrf"           # Options: rrf, comb_sum
+    rrf_k: 60               # RRF constant
+
+  # Retrieval depth
+  per_source_top_k: 50       # Papers to fetch per source per sub-query
+  candidate_pool_size: 200  # Max candidates after fusion
+
+  # Citation traversal
+  citation_traversal:
+    enabled: true
+    max_traversal_nodes: 5    # Top-N papers to traverse
+    max_new_papers: 20        # Max new papers from citation expansion
+    pagerank_alpha: 0.85      # PageRank damping factor
+
+  # Rate limiting (requests per second)
+  rate_limit:
+    semantic_scholar: 0.3    # 1 req per 3 seconds (100/5min limit)
+    arxiv: 1.0               # 1 req per second
+    openalex: 5.0            # 5 req per second (no rate limit)
+    pubmed: 1.0
+    dblp: 2.0
+
+# --- Step 3: Ranking ---
+ranking:
+  # Coarse ranking (zero LLM)
+  coarse:
+    # Weights for multi-dimensional scoring
+    weights:
+      bm25_relevance: 0.25
+      embedding_similarity: 0.25
+      citation_count: 0.15
+      recency: 0.15
+      venue_prestige: 0.10
+      constraint_coverage: 0.10
+
+    # Recency decay (score = exp(-age_in_years / decay_factor))
+    recency_decay_factor: 3.0
+
+    # Venue prestige whitelist
+    top_venues: ["ACL", "EMNLP", "NAACL", "NeurIPS", "ICML",
+                 "ICLR", "CVPR", "ICCV", "AAAI", "IJCAI",
+                 "SIGIR", "WWW", "KDD", "Nature", "Science"]
+
+    top_k_after_coarse: 15  # Papers to pass to fine ranking
+
+  # Fine ranking (LLM API)
+  fine:
+    enabled: true
+    model: "deepseek-v4-flash"        # Same model choices as query_understanding
+    model_provider: "deepseek"
+    temperature: 0.0
+    batch_size: 5             # Papers per LLM call
+    max_tokens: 3000
+
+    # Final score formula
+    final_score:
+      coarse_weight: 0.4
+      llm_weight: 0.6
+
+# --- Step 4: Result Organization ---
+organization:
+  # Topic clustering
+  clustering:
+    n_clusters: null           # null = auto-detect: min(5, N/3)
+    method: "kmeans"           # Options: kmeans, hdbscan
+
+  # Comparison table
+  comparison_table:
+    enabled: true
+    model: "deepseek-v4-flash"
+    model_provider: "deepseek"
+    top_k_papers: 5
+
+  # Citation graph
+  citation_graph:
+    enabled: true
+    format: "mermaid"          # Options: mermaid, json
+
+  # Output layers
+  relevance_layers:
+    highly_relevant: 70        # Score >= 70
+    partially_relevant: 40     # Score >= 40
+    background: 20             # Score >= 20
+
+# --- Evaluation ---
+evaluation:
+  # Metrics to compute
+  metrics:
+    - "precision"
+    - "recall"
+    - "f1"
+    - "recall_at_5"
+    - "recall_at_10"
+    - "recall_at_20"
+    - "recall_at_50"
+    - "ndcg"
+
+  # For Asta semantic queries: LLM-judge based scoring
+  asta_judge:
+    model: "deepseek-v4-flash"
+    model_provider: "deepseek"
+
+# --- LLM Call Logging ---
+llm:
+  log_prompts: true          # 是否记录每次调用的 prompt/response 内容
+  log_file: "logs/llm_calls.log"   # 单独文件，不污染主日志
+  truncate_length: 2000      # 每条 prompt/response 截断长度（0=不截断）
+
+# --- Logging ---
+logging:
+  level: "INFO"              # DEBUG, INFO, WARNING, ERROR
+  file: "logs/pipeline.log"
+  print_to_console: true

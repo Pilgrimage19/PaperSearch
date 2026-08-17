@@ -1,0 +1,21 @@
+# ============================================================
+# Core dependencies for Academic Paper Search Pipeline
+# ============================================================
+
+# API clients
+requests>=2.31.0
+
+# YAML config
+pyyaml>=6.0
+
+# Numerical
+numpy>=1.24.0
+
+# Optional: PageRank computation for citation traversal
+networkx>=3.0
+
+# Local embedding models (sentence-transformers)
+sentence-transformers>=2.7.0
+
+# Optional: OpenAI API
+# openai>=1.0.0

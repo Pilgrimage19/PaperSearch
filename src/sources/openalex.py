@@ -3,6 +3,7 @@
 # Docs: https://docs.openalex.org/
 # ============================================================
 
+import re
 import time
 import requests
 from typing import List, Dict, Any, Optional
@@ -113,7 +114,7 @@ class OpenAlexClient:
 
         # Extract IDs
         ids = work.get("ids", {})
-        arxiv_id = ""
+        arxiv_id = self._extract_arxiv_id(work)
         doi = ids.get("doi", "")
         if doi:
             doi = doi.replace("https://doi.org/", "")
@@ -132,6 +133,20 @@ class OpenAlexClient:
             "url": ids.get("openalex") or "",
             "source": "openalex",
         }
+
+    @staticmethod
+    def _extract_arxiv_id(work: Dict) -> str:
+        """Extract arXiv ID from OpenAlex location URLs (strip version suffix)."""
+        locs = [work.get("primary_location")] + (work.get("locations") or [])
+        for loc in locs:
+            if not isinstance(loc, dict):
+                continue
+            for key in ("landing_page_url", "pdf_url"):
+                url = loc.get(key) or ""
+                m = re.search(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5})", url)
+                if m:
+                    return m.group(1)
+        return ""
 
     @staticmethod
     def _extract_abstract(work: Dict) -> str:

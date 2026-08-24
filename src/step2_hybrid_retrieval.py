@@ -59,7 +59,7 @@ def step2_retrieve_all(
 
         for source_name in source_list:
             source_papers = _retrieve_from_source(
-                source_name, kw_queries, per_source_k, time_range
+                source_name, kw_queries, nl_queries, per_source_k, time_range
             )
             for p in source_papers:
                 pid = p.get("paper_id", "")
@@ -91,6 +91,12 @@ def step2_retrieve_all(
 
         logger.info(f"  Phase 2 (BM25+Embedding fusion): {len(filtered)} candidates")
 
+        # ---- arxiv_id 补全（对空 arxiv_id 的论文用标题去 arXiv 查询）----
+        max_enrich = config.get("retrieval", "enrich_arxiv_id_max", default=20)
+        enriched = _enrich_arxiv_ids(filtered, max_enrich=max_enrich)
+        if enriched:
+            logger.info(f"  arXiv id enrichment: +{enriched} papers")
+
         # ---- Phase 3: Citation Expansion ----
         expanded = expand_with_citations(filtered, s2_client)
         if len(expanded) > len(filtered):
@@ -101,6 +107,17 @@ def step2_retrieve_all(
             "query": query,
             "query_type": qtype,
             "candidates": expanded,
+            # 诊断用：保存各阶段的论文（精简字段）
+            "phase1_papers": [
+                {"paper_id": p.get("paper_id", ""), "arxiv_id": p.get("arxiv_id", ""),
+                 "title": p.get("title", "")}
+                for p in all_papers
+            ],
+            "phase2_papers": [
+                {"paper_id": p.get("paper_id", ""), "arxiv_id": p.get("arxiv_id", ""),
+                 "title": p.get("title", "")}
+                for p in filtered
+            ],
             "metadata": {
                 "api_recall_count": len(all_papers),
                 "after_fusion_count": len(filtered),
@@ -112,18 +129,57 @@ def step2_retrieve_all(
     return results
 
 
+def _enrich_arxiv_ids(
+    papers: List[Dict[str, Any]],
+    max_enrich: int = 20,
+) -> int:
+    """
+    对 arxiv_id 为空的论文，用标题去 arXiv 查询补全 arxiv_id。
+    遇到 arXiv 限流（429）会抛异常，立即终止避免刷屏。
+    返回成功补全的论文数。
+    """
+    enriched = 0
+    for p in papers:
+        if enriched >= max_enrich:
+            break
+        if p.get("arxiv_id"):
+            continue
+        title = p.get("title") or ""
+        if not title:
+            continue
+        try:
+            arxiv_id = arxiv_client.search_by_title(title)
+        except Exception as e:
+            logger.warning(f"arXiv enrich aborted (likely rate limit): {e}")
+            break
+        if arxiv_id:
+            p["arxiv_id"] = arxiv_id
+            enriched += 1
+    return enriched
+
+
 def _retrieve_from_source(
     source_name: str,
     kw_queries: List[str],
+    nl_queries: List[str],
     per_source_k: int,
     time_range: Optional[Dict[str, str]],
 ) -> List[Dict[str, Any]]:
-    """Retrieve papers from a single source for all keyword queries."""
+    """
+    Retrieve papers from a single source.
+    Semantic Scholar 支持自然语言语义搜索，用 kw + nl；arXiv/OpenAlex 关键词导向，只用 kw。
+    """
     year_start = int(time_range["start"]) if time_range and time_range.get("start") else None
     year_end = int(time_range["end"]) if time_range and time_range.get("end") else None
 
+    # Semantic Scholar 的 search 端点能处理自然语言句子，加入语义召回
+    if source_name == "semantic_scholar":
+        queries = (kw_queries[:5] + nl_queries[:2])
+    else:
+        queries = kw_queries[:5]
+
     all_papers = []
-    for q in kw_queries[:5]:  # Limit keyword queries per source
+    for q in queries:
         try:
             if source_name == "semantic_scholar":
                 papers = s2_client.keyword_search(

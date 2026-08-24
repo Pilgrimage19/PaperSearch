@@ -80,18 +80,22 @@ Papers to evaluate:
 For EACH paper, return a JSON object with:
 {{
   "paper_index": <integer matching the paper number>,
-  "constraint_scores": {{"constraint_name": <0.0-1.0>, ...}},
+  "constraint_scores": {{"<dimension>": <0.0-1.0>, ...}},
   "overall_score": <0-100 integer, higher = more relevant>,
-  "evidence": "<one sentence summarizing the key relevant finding from this paper>",
+  "evidence": "<ONE short sentence, under 20 words>",
   "relevance_level": "highly_relevant" / "partially_relevant" / "background"
 }}
+
+IMPORTANT rules for constraint_scores:
+- The KEY must be the constraint's "dimension" field (e.g. "method", "task", "data", "time", "venue", "performance"), NOT the full value text.
+- Example: if a constraint is {{"dimension": "method", "value": "large language model pre-training"}}, use {{"method": 0.8}}, NOT {{"large language model pre-training": 0.8}}.
 
 Scoring guidelines:
 - highly_relevant (70-100): satisfies ALL must constraints + most should constraints
 - partially_relevant (40-69): satisfies some must constraints or only should constraints
 - background (0-39): domain-related but not directly matching query intent
 - Use the full 0-100 range; do not cluster scores in the middle
-- Evidence should cite specific methods, datasets, or results
+- Evidence must be ONE short sentence under 20 words
 
 Return a JSON array of these objects, one per paper, in the same order as the input.
 Return ONLY valid JSON, no other text."""

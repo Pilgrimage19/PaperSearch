@@ -3,7 +3,9 @@
 # Docs: https://info.arxiv.org/help/api/
 # ============================================================
 
+import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -96,6 +98,33 @@ class ArxivClient:
             all_papers.extend(self._fetch_and_parse(url))
         return all_papers
 
+    def search_by_title(self, title: str, max_results: int = 5) -> Optional[str]:
+        """
+        用标题在 arXiv 搜索，返回匹配的 arxiv_id。
+        标题相似度低于阈值返回 None，避免错配。
+        """
+        import difflib
+        clean_title = title.replace('"', "").strip()
+        if not clean_title:
+            return None
+        query = f'ti:"{clean_title}"'
+        papers = self.search(query, max_results=max_results, sort_by="relevance")
+        if not papers:
+            return None
+
+        target = _norm_title(clean_title)
+        best_arxiv_id = None
+        best_score = 0.0
+        for p in papers:
+            score = difflib.SequenceMatcher(None, target, _norm_title(p.get("title", ""))).ratio()
+            if score > best_score:
+                best_score = score
+                best_arxiv_id = p.get("arxiv_id")
+
+        if best_arxiv_id and best_score >= 0.85:
+            return best_arxiv_id
+        return None
+
     # ---- Internal ----
 
     def _fetch_and_parse(self, url: str) -> List[Dict[str, Any]]:
@@ -107,6 +136,17 @@ class ArxivClient:
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     xml_data = resp.read().decode("utf-8")
                 return self._parse_response(xml_data)
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    # 限流：抛异常让上层感知，提前终止而不是反复重试
+                    if attempt == 2:
+                        raise RuntimeError("arXiv rate limited (HTTP 429)")
+                    time.sleep(2 ** attempt)
+                else:
+                    if attempt == 2:
+                        print(f"[WARN] arXiv API HTTP {e.code} after 3 retries")
+                        return []
+                    time.sleep(2 ** attempt)
             except Exception as e:
                 if attempt == 2:
                     print(f"[WARN] arXiv API failed after 3 retries: {e}")
@@ -130,11 +170,12 @@ class ArxivClient:
         summary_el = entry.find("atom:summary", NAMESPACES)
         abstract = (summary_el.text or "").strip().replace("\n", " ") if summary_el is not None else ""
 
-        # Extract arXiv ID from the <id> tag
+        # Extract arXiv ID from the <id> tag (strip version suffix like v2)
         id_el = entry.find("atom:id", NAMESPACES)
         arxiv_id = ""
         if id_el is not None and id_el.text:
             arxiv_id = id_el.text.split("/abs/")[-1]
+            arxiv_id = re.sub(r"v\d+$", "", arxiv_id)
 
         # Published date
         published_el = entry.find("atom:published", NAMESPACES)
@@ -173,6 +214,11 @@ class ArxivClient:
             "categories": categories,
             "source": "arxiv",
         }
+
+
+def _norm_title(t: str) -> str:
+    """归一化标题：小写 + 去除非字母数字，用于标题相似度比较。"""
+    return re.sub(r"[^a-z0-9]+", "", (t or "").lower())
 
 
 # Singleton

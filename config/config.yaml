@@ -83,20 +83,24 @@ retrieval:
   per_source_top_k: 50       # Papers to fetch per source per sub-query
   candidate_pool_size: 200  # Max candidates after fusion
 
-  # Citation traversal
+  # Citation traversal（前向+后向引文扩展）
   citation_traversal:
     enabled: true
-    max_traversal_nodes: 5    # Top-N papers to traverse
-    max_new_papers: 20        # Max new papers from citation expansion
-    pagerank_alpha: 0.85      # PageRank damping factor
+    max_traversal_nodes: 20   # 遍历 top-N 篇论文的引文（原 5）
+    max_new_papers: 50        # 最多新增论文数（原 20）
+    refs_per_paper: 30        # 每篇取多少后向引文（references）
+    cites_per_paper: 30       # 每篇取多少前向引文（citations）
 
   # Rate limiting (requests per second)
   rate_limit:
     semantic_scholar: 0.3    # 1 req per 3 seconds (100/5min limit)
-    arxiv: 1.0               # 1 req per second
+    arxiv: 0.33              # arXiv 官方要求每 3 秒最多 1 请求（原 1.0 太快）
     openalex: 5.0            # 5 req per second (no rate limit)
     pubmed: 1.0
     dblp: 2.0
+
+  # arxiv_id 补全上限（用标题去 arXiv 查询，过多会触发 arXiv 限流）
+  enrich_arxiv_id_max: 20
 
 # --- Step 3: Ranking ---
 ranking:
@@ -127,8 +131,8 @@ ranking:
     model: "deepseek-v4-flash"        # Same model choices as query_understanding
     model_provider: "deepseek"
     temperature: 0.0
-    batch_size: 5             # Papers per LLM call
-    max_tokens: 3000
+    batch_size: 2             # Papers per LLM call（5 太大易导致 JSON 截断）
+    max_tokens: 6000          # 给足输出空间（原 3000）
 
     # Final score formula
     final_score:

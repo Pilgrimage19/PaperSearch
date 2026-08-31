@@ -18,6 +18,7 @@ class OpenAlexClient:
 
     def __init__(self):
         self.rate = config.get("retrieval", "rate_limit", "openalex", default=5.0)
+        self.email = config.get_api_key("OPENALEX_EMAIL") or "research@example.com"
         self._last_request = 0.0
 
     def _rate_limit(self) -> None:
@@ -25,6 +26,26 @@ class OpenAlexClient:
         if elapsed < (1.0 / self.rate):
             time.sleep(1.0 / self.rate - elapsed)
         self._last_request = time.time()
+
+    def _get(self, url: str, params: Optional[Dict] = None) -> Optional[Dict]:
+        """GET with mailto param + 429 retry."""
+        params = dict(params or {})
+        params["mailto"] = self.email
+        self._rate_limit()
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, params=params, timeout=30)
+                if resp.status_code == 429:
+                    time.sleep(2 ** attempt)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+            except requests.RequestException as e:
+                if attempt == 2:
+                    print(f"[WARN] OpenAlex API error: {e}")
+                    return None
+                time.sleep(2 ** attempt)
+        return None
 
     def search_works(self, query: str, limit: int = 50,
                      filters: Optional[Dict[str, Any]] = None,
@@ -34,7 +55,6 @@ class OpenAlexClient:
         Search works (papers) on OpenAlex.
         Supports structured filters for metadata queries.
         """
-        self._rate_limit()
         params = {
             "search": query,
             "per_page": min(limit, 200),
@@ -56,45 +76,31 @@ class OpenAlexClient:
         if filter_parts:
             params["filter"] = ",".join(filter_parts)
 
-        try:
-            resp = requests.get(f"{BASE_URL}/works", params=params, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            return [self._normalize(w) for w in data.get("results", [])]
-        except requests.RequestException as e:
-            print(f"[WARN] OpenAlex API error: {e}")
+        data = self._get(f"{BASE_URL}/works", params=params)
+        if data is None:
             return []
+        return [self._normalize(w) for w in data.get("results", [])]
 
     def search_by_author(self, author_name: str, year_start: Optional[int] = None,
                          year_end: Optional[int] = None, limit: int = 50) -> List[Dict[str, Any]]:
         """Search papers by author name - for metadata queries."""
-        filters = {}
-        if year_start:
-            filters["publication_year"] = f">{year_start - 1}"
-        # Use the general search with author filter
         return self.search_works(author_name, limit=limit,
                                  year_start=year_start, year_end=year_end)
 
     def get_work(self, openalex_id: str) -> Optional[Dict[str, Any]]:
         """Get a single work by OpenAlex ID."""
-        self._rate_limit()
-        try:
-            resp = requests.get(f"{BASE_URL}/works/{openalex_id}", timeout=30)
-            resp.raise_for_status()
-            return self._normalize(resp.json())
-        except requests.RequestException:
+        data = self._get(f"{BASE_URL}/works/{openalex_id}")
+        if data is None:
             return None
+        return self._normalize(data)
 
     def get_citations(self, openalex_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         """Get works that cite this work."""
-        self._rate_limit()
-        try:
-            resp = requests.get(f"{BASE_URL}/works/{openalex_id}/cited_by",
-                                params={"per_page": min(limit, 200)}, timeout=30)
-            resp.raise_for_status()
-            return [self._normalize(w) for w in resp.json().get("results", [])]
-        except requests.RequestException:
+        data = self._get(f"{BASE_URL}/works/{openalex_id}/cited_by",
+                         params={"per_page": min(limit, 200)})
+        if data is None:
             return []
+        return [self._normalize(w) for w in data.get("results", [])]
 
     # ---- Normalization ----
 

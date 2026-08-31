@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ScholarSeeker · 约束自省的迭代式学术论文搜索系统</title>
+<style>
+  :root {
+    --primary:#2E75B6; --primary-light:#DEEBF7; --orange:#ED7D31; --orange-light:#FBE5D6;
+    --green:#548235; --green-light:#E2EFDA; --gray:#7F7F7F; --gray-light:#F2F2F2;
+    --text:#1F3864; --bg:#F5F7FA;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Microsoft YaHei","PingFang SC",sans-serif; background:var(--bg); color:#333; line-height:1.6; }
+  .header { background:linear-gradient(135deg,#1F3864,#2E75B6); color:#fff; padding:24px 24px; text-align:center; }
+  .header h1 { font-size:22px; margin-bottom:4px; }
+  .header p { font-size:13px; opacity:.85; }
+  .search-wrap { max-width:860px; margin:-18px auto 0; padding:0 24px; }
+  .search-row { display:flex; gap:10px; }
+  .search-row input { flex:1; padding:13px 16px; font-size:14px; border:1px solid #ddd; border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,.08); outline:none; background:#fff; }
+  .search-row button { padding:0 26px; background:var(--primary); color:#fff; border:none; border-radius:10px; font-size:15px; cursor:pointer; }
+  .container { max-width:860px; margin:0 auto; padding:20px 24px; }
+  /* 查询历史 */
+  .history-card { background:#fff; border-radius:12px; padding:16px 20px; margin:16px 0 0; box-shadow:0 2px 8px rgba(0,0,0,.05); }
+  .history-card h3 { font-size:14px; color:var(--text); margin-bottom:10px; font-weight:bold; }
+  .history-item { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:8px; cursor:pointer; transition:.15s; border:1px solid transparent; }
+  .history-item:hover { background:var(--primary-light); border-color:var(--primary); }
+  .history-item .clock { font-size:13px; color:#aaa; flex-shrink:0; }
+  .history-item .q { flex:1; font-size:14px; color:#333; }
+  .history-item .q:hover { color:var(--primary); }
+  .history-item .time { font-size:12px; color:#aaa; flex-shrink:0; }
+  /* 结果卡片 */
+  .card { background:#fff; border-radius:12px; padding:20px 24px; margin-bottom:20px; box-shadow:0 2px 8px rgba(0,0,0,.05); }
+  .card h2 { font-size:16px; color:var(--text); margin-bottom:14px; padding-bottom:10px; border-bottom:2px solid var(--primary-light); }
+  .constraint-list { display:flex; flex-wrap:wrap; gap:8px; }
+  .ctag { background:var(--primary-light); color:var(--text); padding:5px 12px; border-radius:18px; font-size:13px; }
+  .ctag .dim { font-weight:bold; }
+  .nec { display:inline-block; margin-left:6px; padding:1px 7px; border-radius:9px; font-size:11px; }
+  .must { background:var(--orange); color:#fff; } .should { background:var(--green); color:#fff; }
+  .subquery { margin-top:10px; font-size:13px; color:#555; }
+  .tabs { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
+  .tab { padding:7px 18px; border-radius:20px; cursor:pointer; font-size:14px; background:var(--gray-light); color:#555; border:1px solid #ddd; transition:.15s; }
+  .tab:hover { background:var(--primary-light); }
+  .tab.active { background:var(--primary); color:#fff; border-color:var(--primary); }
+  .paper { border:1px solid #eee; border-radius:10px; padding:13px 15px; margin-bottom:10px; }
+  .paper .title { font-size:14px; font-weight:bold; color:var(--text); }
+  .paper .meta { font-size:12px; color:#888; margin-top:3px; }
+  .paper .evidence { font-size:13px; color:#555; margin-top:8px; padding:8px 12px; background:var(--gray-light); border-radius:6px; border-left:3px solid var(--primary); }
+  .badge { display:inline-block; padding:2px 9px; border-radius:11px; font-size:11px; margin-right:6px; }
+  .badge.high { background:var(--green-light); color:var(--green); }
+  .badge.partial { background:var(--orange-light); color:var(--orange); }
+  .badge.back { background:var(--gray-light); color:var(--gray); }
+  table.matrix { width:100%; border-collapse:collapse; font-size:12px; }
+  table.matrix th, table.matrix td { padding:8px; text-align:center; border:1px solid #e0e0e0; }
+  table.matrix th { background:var(--primary-light); color:var(--text); }
+  td.s-high { background:#D9EAF7; color:var(--text); font-weight:bold; }
+  td.s-mid { background:#FFF3E0; color:var(--orange); }
+  td.s-low { background:var(--orange-light); color:#843C0C; }
+  table.compare { width:100%; border-collapse:collapse; font-size:12px; }
+  table.compare th, table.compare td { padding:8px; text-align:left; border:1px solid #e0e0e0; }
+  table.compare th { background:var(--green-light); color:#375623; }
+  .stats { display:flex; gap:24px; flex-wrap:wrap; }
+  .stat .num { font-size:22px; font-weight:bold; color:var(--primary); }
+  .stat .label { font-size:12px; color:#888; }
+  .empty { text-align:center; color:#999; padding:40px; font-size:14px; }
+  .footer { text-align:center; padding:20px; color:#999; font-size:12px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>ScholarSeeker</h1>
+  <p>约束自省的迭代式学术论文搜索系统</p>
+</div>
+
+<div class="search-wrap">
+  <div class="search-row">
+    <input type="text" id="query" placeholder="输入你的研究问题，如：哪些研究用 BERT 类模型在中文社交媒体上做情感分析？">
+    <button onclick="alert('演示模式：请从下方查询历史中选择一条查看结果')">搜索</button>
+  </div>
+</div>
+
+<!-- 查询历史 -->
+<div class="container">
+  <div class="history-card">
+    <h3>🕘 查询历史</h3>
+    <div class="history-item" onclick="loadDemo('q1')">
+      <span class="clock">🔍</span>
+      <span class="q">哪些研究用 BERT 类模型在中文社交媒体数据上做情感分析？</span>
+      <span class="time">10:32</span>
+    </div>
+    <div class="history-item" onclick="loadDemo('q2')">
+      <span class="clock">🔍</span>
+      <span class="q">有没有研究用强化学习训练大语言模型 Agent 做任务规划？</span>
+      <span class="time">昨天</span>
+    </div>
+    <div class="history-item" onclick="loadDemo('q3')">
+      <span class="clock">🔍</span>
+      <span class="q">给我一些关于大语言模型推理效率优化的论文</span>
+      <span class="time">2 天前</span>
+    </div>
+  </div>
+</div>
+
+<!-- 结果区域 -->
+<div class="container" id="result">
+  <div class="empty">输入研究问题，或点击上方「查询历史」查看检索结果</div>
+</div>
+
+<div class="footer">ScholarSeeker · 约束自省的迭代式学术论文搜索系统</div>
+
+<script>
+const demos = {
+  q1: {
+    query: "哪些研究用 BERT 类模型在中文社交媒体数据上做情感分析？",
+    constraints: [
+      { dim:"方法 method", val:"BERT 类模型", nec:"must" },
+      { dim:"任务 task", val:"情感分析", nec:"must" },
+      { dim:"数据 data", val:"中文社交媒体", nec:"must" },
+      { dim:"时间 time", val:"近三年", nec:"should" },
+    ],
+    subqueries: { kw:["BERT 中文情感分析","微博情感分类","BERT-wwm 情感分析"], nl:"BERT 模型在中文情感分类任务上的表现" },
+    papers: {
+      high: [
+        { title:"Pre-Training with Whole Word Masking for Chinese BERT（BERT-wwm）", meta:"Cui et al. · 2019 · arXiv", score:92, evidence:"提出全词掩码的中文 BERT 预训练，在中文情感分析等任务上显著提升，是中文 BERT 类模型的基础工作。" },
+        { title:"SKEP: Sentiment Knowledge Enhanced Pre-training for Sentiment Analysis", meta:"Tian et al. · ACL 2020", score:90, evidence:"将情感知识引入预训练，面向情感分析任务设计，在中文情感分类数据集上取得领先效果。" },
+        { title:"ERNIE: Enhanced Representation through Knowledge Integration", meta:"Sun et al. · 2019 · arXiv", score:87, evidence:"百度提出的知识增强语义表示模型，引入实体级知识掩码，在中文情感分析任务上效果显著。" },
+        { title:"RoBERTa-wwm-ext: 中文预训练模型", meta:"Cui et al. · 2019 · arXiv", score:85, evidence:"基于全词掩码与动态掩码的中文 RoBERTa，进一步提升了中文情感分析等下游任务的性能。" },
+        { title:"面向微博文本的情感分析研究综述", meta:"综述 · 2021 · 中文期刊", score:82, evidence:"系统梳理了中文社交媒体（微博）情感分析的方法与数据集，覆盖 BERT 类模型的应用。" },
+      ],
+      partial: [
+        { title:"BERT: Pre-training of Deep Bidirectional Transformers", meta:"Devlin et al. · NAACL 2019", score:68, evidence:"BERT 原始模型，是中文 BERT 类模型的基础，但未针对中文社交媒体数据做优化。" },
+        { title:"Fine-tuning BERT for Sentiment Analysis on English Reviews", meta:"2020 · 会议论文", score:62, evidence:"方法（BERT 微调）与任务（情感分析）相关，但数据为英文评论，不满足「中文社交媒体」约束。" },
+      ],
+      back: [
+        { title:"Attention Is All You Need（Transformer）", meta:"Vaswani et al. · NeurIPS 2017", score:42, evidence:"Transformer 架构原始论文，BERT 类模型的架构基础。" },
+      ],
+    },
+    matrix: {
+      cols:["方法(BERT)","任务(情感分析)","数据(中文社媒)","时间(近3年)"],
+      rows:[
+        { name:"BERT-wwm", scores:[1.00,0.95,0.90,0.80] },
+        { name:"SKEP", scores:[0.95,1.00,0.95,0.75] },
+        { name:"ERNIE", scores:[0.95,0.90,0.90,0.75] },
+        { name:"RoBERTa-wwm", scores:[1.00,0.95,0.90,0.80] },
+        { name:"BERT(原始)", scores:[0.85,0.80,0.20,0.20] },
+      ],
+    },
+    compare: {
+      cols:["模型","预训练语料","情感任务","主要数据集","最佳指标"],
+      rows:[
+        ["BERT-wwm","中文维基+新闻","句子级情感","ChnSentiCorp","F1 95.6%"],
+        ["SKEP","情感知识增强","句子/属性级","SST-2, ChnSentiCorp","Acc 97.1%"],
+        ["ERNIE","中文百科+实体","句子级情感","中文情感数据集","Acc 95.5%"],
+        ["RoBERTa-wwm","中文大规模语料","句子级情感","ChnSentiCorp","F1 96.2%"],
+      ],
+    },
+  },
+  q2: {
+    query: "有没有研究用强化学习训练大语言模型 Agent 做任务规划？",
+    constraints: [
+      { dim:"方法 method", val:"强化学习", nec:"must" },
+      { dim:"任务 task", val:"Agent 任务规划", nec:"must" },
+      { dim:"对象 object", val:"大语言模型", nec:"must" },
+    ],
+    subqueries: { kw:["强化学习 LLM Agent 训练","RL 训练语言模型 Agent","PPO LLM 智能体"], nl:"如何用强化学习训练大语言模型智能体进行任务规划" },
+    papers: {
+      high: [
+        { title:"Reflexion: Language Agents with Verbal Reinforcement Learning", meta:"Shinn et al. · NeurIPS 2023", score:91, evidence:"提出语言智能体的口头强化学习，通过语言反馈让 Agent 反思改进，是 LLM Agent 强化学习的代表性工作。" },
+        { title:"AGILE: A Novel Reinforcement Learning Framework of LLM Agents", meta:"Feng et al. · NeurIPS 2024", score:90, evidence:"端到端强化学习训练 LLM Agent，统一优化反思、工具使用与主动咨询等能力，7B 模型可超越 GPT-4。" },
+        { title:"ArCHer: Training Language Model Agents via Hierarchical Multi-Turn RL", meta:"Zhou et al. · 2024 · arXiv", score:86, evidence:"分层多轮强化学习训练语言模型智能体，在任务规划与多轮交互场景下显著提升性能。" },
+        { title:"ReAct: Synergizing Reasoning and Acting in Language Models", meta:"Yao et al. · ICLR 2023", score:84, evidence:"将推理与行动结合，是 LLM Agent 任务规划的基础范式，被广泛用于后续强化学习训练。" },
+      ],
+      partial: [
+        { title:"Toolformer: Language Models Can Teach Themselves to Use Tools", meta:"Schick et al. · NeurIPS 2023", score:65, evidence:"让语言模型学会使用工具，与 Agent 任务规划相关，但采用自监督而非强化学习训练。" },
+      ],
+      back: [
+        { title:"Proximal Policy Optimization Algorithms（PPO）", meta:"Schulman et al. · 2017 · arXiv", score:45, evidence:"强化学习经典算法，是训练 LLM Agent 常用的优化方法，背景参考。" },
+      ],
+    },
+    matrix: {
+      cols:["方法(RL)","任务(Agent规划)","对象(LLM)"],
+      rows:[
+        { name:"Reflexion", scores:[1.00,0.90,0.95] },
+        { name:"AGILE", scores:[1.00,0.95,0.95] },
+        { name:"ArCHer", scores:[1.00,0.95,0.90] },
+        { name:"ReAct", scores:[0.50,1.00,0.95] },
+      ],
+    },
+    compare: {
+      cols:["方法","训练范式","Agent 能力","基础模型","关键结果"],
+      rows:[
+        ["Reflexion","口头 RL","反思、任务规划","GPT-4/PaLM","HumanEval 91%"],
+        ["AGILE","PPO 端到端","反思、工具、咨询","Vicuna-13B","超越 GPT-4"],
+        ["ArCHer","分层多轮 RL","多轮交互规划","LLaMA","显著提升"],
+        ["ReAct","提示（无训练）","推理+行动","PaLM/GPT","广泛基准提升"],
+      ],
+    },
+  },
+  q3: {
+    query: "给我一些关于大语言模型推理效率优化的论文",
+    constraints: [
+      { dim:"任务 task", val:"推理效率优化", nec:"must" },
+      { dim:"对象 object", val:"大语言模型", nec:"must" },
+    ],
+    subqueries: { kw:["LLM 推理加速","大模型量化推理","KV Cache 优化"], nl:"如何提升大语言模型的推理速度和效率" },
+    papers: {
+      high: [
+        { title:"vLLM: Easy, Fast, and Cheap LLM Serving with PagedAttention", meta:"Kwon et al. · SOSP 2023", score:92, evidence:"提出 PagedAttention 分页注意力机制，大幅提升 LLM 推理吞吐，是当前主流的推理加速框架。" },
+        { title:"FlashAttention: Fast and Memory-Efficient Exact Attention", meta:"Dao et al. · NeurIPS 2022", score:90, evidence:"通过 IO 感知的注意力计算优化，显著降低注意力计算的内存与时间开销，广泛用于推理加速。" },
+        { title:"AWQ: Activation-aware Weight Quantization for LLM Compression", meta:"Lin et al. · 2023 · arXiv", score:87, evidence:"激活感知的权重量化方法，在保持精度的同时大幅压缩模型、加速推理。" },
+        { title:"Speculative Decoding", meta:"Leviathan et al. · ICML 2023", score:84, evidence:"用小模型草拟、大模型验证的投机解码策略，在保持精度的同时显著加速生成。" },
+      ],
+      partial: [
+        { title:"Distilling the Knowledge in a Neural Network", meta:"Hinton et al. · 2015 · arXiv", score:62, evidence:"知识蒸馏经典工作，可用于压缩模型提升推理效率，但不专门针对 LLM。" },
+      ],
+      back: [
+        { title:"Attention Is All You Need（Transformer）", meta:"Vaswani et al. · NeurIPS 2017", score:40, evidence:"Transformer 架构，是 LLM 推理的基础，背景参考。" },
+      ],
+    },
+    matrix: {
+      cols:["任务(推理优化)","对象(LLM)"],
+      rows:[
+        { name:"vLLM", scores:[1.00,1.00] },
+        { name:"FlashAttention", scores:[0.90,0.90] },
+        { name:"AWQ", scores:[1.00,0.95] },
+        { name:"投机解码", scores:[1.00,0.95] },
+      ],
+    },
+    compare: {
+      cols:["方法","优化维度","加速方式","代价","适用场景"],
+      rows:[
+        ["vLLM","显存/吞吐","PagedAttention","无精度损失","在线服务"],
+        ["FlashAttention","内存/计算","IO 感知","无精度损失","通用"],
+        ["AWQ","模型体积","激活感知量化","轻微精度损失","部署压缩"],
+        ["投机解码","生成速度","草稿+验证","需小模型","长文本生成"],
+      ],
+    },
+  },
+};
+
+let currentKey = null;
+let currentLayer = 'high';
+
+function loadDemo(key) {
+  currentKey = key;
+  currentLayer = 'high';
+  const d = demos[key];
+  document.getElementById("query").value = d.query;
+  render(d);
+}
+
+function render(d) {
+  let html = "";
+  html += `<div class="card"><h2>🔍 查询理解与约束分解</h2><div class="constraint-list">`;
+  html += d.constraints.map(c => `<span class="ctag"><span class="dim">${c.dim}</span> = ${c.val}<span class="nec ${c.nec}">${c.nec}</span></span>`).join("");
+  html += `</div><div class="subquery"><b>关键词查询：</b>${d.subqueries.kw.join("、")}<br><b>语义查询：</b>${d.subqueries.nl}</div></div>`;
+
+  // 分层列表：Tab 切换
+  const highN = (d.papers.high||[]).length, partialN = (d.papers.partial||[]).length, backN = (d.papers.back||[]).length;
+  html += `<div class="card"><h2>📄 检索结果（分层）</h2>
+    <div class="tabs">
+      <div class="tab active" id="tab-high" onclick="switchLayer('high')">高度相关（${highN}）</div>
+      <div class="tab" id="tab-partial" onclick="switchLayer('partial')">部分相关（${partialN}）</div>
+      <div class="tab" id="tab-back" onclick="switchLayer('back')">背景参考（${backN}）</div>
+    </div>
+    <div id="paper-list"></div>
+  </div>`;
+
+  html += `<div class="card"><h2>📊 约束满足矩阵</h2><table class="matrix"><tr><th>论文 \\ 约束</th>`;
+  d.matrix.cols.forEach(c => html += `<th>${c}</th>`);
+  html += `</tr>`;
+  d.matrix.rows.forEach(r => {
+    html += `<tr><td style="text-align:left;font-weight:bold;">${r.name}</td>`;
+    r.scores.forEach(s => {
+      const cls = s >= 0.8 ? 's-high' : (s >= 0.5 ? 's-mid' : 's-low');
+      html += `<td class="${cls}">${s.toFixed(2)}</td>`;
+    });
+    html += `</tr>`;
+  });
+  html += `</table></div>`;
+
+  html += `<div class="card"><h2>📋 方法对比表</h2><table class="compare"><tr>`;
+  d.compare.cols.forEach(c => html += `<th>${c}</th>`);
+  html += `</tr>`;
+  d.compare.rows.forEach(r => { html += `<tr>${r.map(c => `<td>${c}</td>`).join("")}</tr>`; });
+  html += `</table></div>`;
+
+  const total = (d.papers.high||[]).length + (d.papers.partial||[]).length + (d.papers.back||[]).length;
+  html += `<div class="card"><h2>⚡ 检索统计</h2><div class="stats">
+    <div class="stat"><div class="num">${total}</div><div class="label">召回论文数</div></div>
+    <div class="stat"><div class="num">2</div><div class="label">迭代轮数</div></div>
+    <div class="stat"><div class="num">3~5</div><div class="label">大模型调用</div></div>
+  </div></div>`;
+
+  document.getElementById("result").innerHTML = html;
+  renderPapers(currentLayer);
+  document.getElementById("result").scrollIntoView({ behavior:"smooth" });
+}
+
+function switchLayer(layer) {
+  currentLayer = layer;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + layer).classList.add('active');
+  renderPapers(layer);
+}
+
+function renderPapers(layer) {
+  const d = demos[currentKey];
+  const papers = d.papers[layer] || [];
+  const badgeMap = { high:['high','高度相关'], partial:['partial','部分相关'], back:['back','背景参考'] };
+  const [cls, label] = badgeMap[layer];
+  const el = document.getElementById("paper-list");
+  if (!el) return;
+  el.innerHTML = papers.map(p =>
+    `<div class="paper"><span class="badge ${cls}">${label}</span><span style="float:right;font-size:12px;color:#888;">相关度 ${p.score}</span>
+      <div class="title">${p.title}</div><div class="meta">${p.meta}</div><div class="evidence">${p.evidence}</div></div>`
+  ).join("");
+}
+</script>
+</body>
+</html>

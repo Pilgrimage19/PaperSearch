@@ -12,7 +12,7 @@ from src.utils.logger import setup_logger
 from src.utils.cache import ResultCache
 from src.llm.token_counter import llm_stats, reset_token_stats
 from src.utils.data_loader import (
-    load_pasa_dataset, load_asta_dataset,
+    load_pasa_dataset, load_asta_dataset, get_query_id,
 )
 from src.step1_query_understanding import step1_process_all
 from src.step2_hybrid_retrieval import step2_retrieve_all
@@ -20,10 +20,70 @@ from src.step3_ranking import step3_rank_all
 from src.step4_result_organization import step4_organize_all, generate_markdown_output
 
 
+# ---- 增量重跑相关：判断结果是否异常 ----
+
+def _is_step1_bad(result: Dict[str, Any]) -> bool:
+    """Step 1 结果异常：子查询 fallback（keyword 只有原始查询）或为空。"""
+    parsed = result.get("parsed", {})
+    sq = parsed.get("sub_queries", {})
+    kw = sq.get("keyword", [])
+    query = (result.get("query") or "").strip()
+    if not kw:
+        return True
+    if len(kw) == 1 and kw[0].strip() == query:
+        return True
+    return False
+
+
+def _is_step2_bad(result: Dict[str, Any]) -> bool:
+    """Step 2 结果异常：Phase1 召回为空（限流导致）。"""
+    phase1 = result.get("phase1_papers", [])
+    candidates = result.get("candidates", [])
+    return not phase1 or not candidates
+
+
+def _load_existing(filename: str) -> Optional[List[Dict[str, Any]]]:
+    """从 output 目录读取现有的中间结果，不存在返回 None。"""
+    path = config.project_root / "output" / filename
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def _merge_rerun(items, existing, is_bad_fn, process_fn) -> List[Dict[str, Any]]:
+    """
+    增量重跑：保留现有结果中「正常」的查询，只重跑「有问题」的查询，最后合并。
+    items 与 existing 都以 qid 对齐。
+    """
+    existing_by_qid = {r.get("qid"): r for r in existing if r.get("qid")}
+    good = []
+    bad_items = []
+    bad_qids = []
+    for item in items:
+        qid = get_query_id(item)
+        old = existing_by_qid.get(qid)
+        if old is not None and not is_bad_fn(old):
+            good.append(old)
+        else:
+            bad_items.append(item)
+            bad_qids.append(qid)
+
+    if bad_items:
+        print(f"[Merge] 重跑 {len(bad_items)} 个问题查询: {bad_qids}")
+        good.extend(process_fn(bad_items))
+
+    # 按 items 原始顺序重排
+    qid_order = {get_query_id(item): i for i, item in enumerate(items)}
+    good.sort(key=lambda r: qid_order.get(r.get("qid"), 9999))
+    return good
+
+
 def run_pipeline(
     config_path: str = "config/config.yaml",
     steps: Optional[List[int]] = None,
     overrides: Optional[Dict[str, Any]] = None,
+    merge_existing: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Main pipeline entry point.
@@ -35,6 +95,7 @@ def run_pipeline(
         overrides: Nested path -> value overrides, e.g.
                    {("dataset", "name"): "asta",
                     ("dataset", "query_filter", "max_queries"): 10}
+        merge_existing: True 时读取现有结果，只重跑「有问题」的查询并合并。
 
     Returns:
         Final structured results.
@@ -66,7 +127,15 @@ def run_pipeline(
         logger.info("STEP 1: Query Understanding")
         logger.info("=" * 60)
 
-        parsed_queries = step1_process_all(dataset_items)
+        if merge_existing:
+            existing = _load_existing("step1_parsed_queries.json")
+            if existing:
+                parsed_queries = _merge_rerun(dataset_items, existing, _is_step1_bad, step1_process_all)
+            else:
+                logger.info("No existing step1 results, full run.")
+                parsed_queries = step1_process_all(dataset_items)
+        else:
+            parsed_queries = step1_process_all(dataset_items)
 
         if cache:
             cache.set("step1", {"dataset": cfg.get("dataset", "name")}, parsed_queries)
@@ -75,6 +144,10 @@ def run_pipeline(
         logger.info(f"Step 1 complete. {len(parsed_queries)} queries parsed.")
     else:
         parsed_queries = _load_or_cache(cache, "step1", dataset_items)
+
+    # 按当前 dataset_items 过滤（--max-queries 限制，缓存里可能是全量）
+    valid_qids = {get_query_id(item) for item in dataset_items}
+    parsed_queries = [pq for pq in parsed_queries if pq.get("qid") in valid_qids]
 
     final_results = parsed_queries
     last_step = max(steps) if steps else 1
@@ -86,12 +159,20 @@ def run_pipeline(
             logger.info("STEP 2: Hybrid Retrieval")
             logger.info("=" * 60)
 
-            retrieval_results = step2_retrieve_all(parsed_queries)
+            if merge_existing:
+                existing = _load_existing("step2_retrieval_results.json")
+                if existing:
+                    retrieval_results = _merge_rerun(parsed_queries, existing, _is_step2_bad, step2_retrieve_all)
+                else:
+                    logger.info("No existing step2 results, full run.")
+                    retrieval_results = step2_retrieve_all(parsed_queries)
+            else:
+                retrieval_results = step2_retrieve_all(parsed_queries)
 
-            # Attach parsed data for later steps
-            for i, rr in enumerate(retrieval_results):
-                if i < len(parsed_queries):
-                    rr["parsed"] = parsed_queries[i].get("parsed", {})
+            # Attach parsed data（按 qid 对齐，更健壮）
+            parsed_by_qid = {pq.get("qid"): pq.get("parsed", {}) for pq in parsed_queries}
+            for rr in retrieval_results:
+                rr["parsed"] = parsed_by_qid.get(rr.get("qid"), {})
 
             if cache:
                 cache.set("step2", {"dataset": cfg.get("dataset", "name")}, retrieval_results)
@@ -100,6 +181,9 @@ def run_pipeline(
             logger.info(f"Step 2 complete.")
         else:
             retrieval_results = _load_or_cache(cache, "step2", parsed_queries)
+
+        # 按当前查询范围过滤
+        retrieval_results = [r for r in retrieval_results if r.get("qid") in valid_qids]
 
         final_results = retrieval_results
 
@@ -119,6 +203,9 @@ def run_pipeline(
             logger.info(f"Step 3 complete.")
         else:
             ranking_results = _load_or_cache(cache, "step3", retrieval_results)
+
+        # 按当前查询范围过滤
+        ranking_results = [r for r in ranking_results if r.get("qid") in valid_qids]
 
         final_results = ranking_results
 

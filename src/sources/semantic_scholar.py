@@ -4,9 +4,12 @@
 # ============================================================
 
 import time
+import logging
 import requests
 from typing import List, Dict, Any, Optional
 from src.utils.config_loader import config
+
+logger = logging.getLogger("paper_search.s2")
 
 
 BASE_URL = "https://api.semanticscholar.org/graph/v1"
@@ -42,20 +45,26 @@ class SemanticScholarClient:
         return h
 
     def _get(self, url: str, params: Optional[Dict] = None) -> Dict:
-        """GET request with retry logic."""
+        """
+        GET request with retry logic.
+        429 限流时原地等待窗口滑动（5 分钟），而不是快速失败——因为跳过后面照样限流。
+        """
         self._rate_limit()
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 resp = requests.get(url, headers=self._headers(), params=params, timeout=30)
                 if resp.status_code == 429:
-                    wait = int(resp.headers.get("Retry-After", 5))
+                    wait = 20  # 等 20 秒重试（调用量已降，不会频繁持续限流）
+                    logger.warning(
+                        f"S2 rate limited (429), waiting {wait}s (attempt {attempt+1}/4)"
+                    )
                     time.sleep(wait)
                     continue
                 resp.raise_for_status()
                 return resp.json()
             except requests.RequestException as e:
-                if attempt == 2:
-                    raise RuntimeError(f"S2 API failed after 3 retries: {e}")
+                if attempt == 3:
+                    raise RuntimeError(f"S2 API failed after 4 retries: {e}")
                 time.sleep(2 ** attempt)
         return {}
 

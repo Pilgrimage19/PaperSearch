@@ -1,14 +1,11 @@
 # ============================================================
 # src/step2_hybrid_retrieval.py
-# Module 2: Hybrid Retrieval (BM25 + Embedding + Citation Traversal)
-# Zero LLM calls - pure retrieval
+# Module 2: 混合检索（BM25 + Embedding + 引文遍历）+ 迭代检索
 # ============================================================
 
 import logging
 from typing import List, Dict, Any, Optional
 from src.utils.config_loader import config
-
-logger = logging.getLogger("paper_search.step2")
 from src.sources.semantic_scholar import s2_client
 from src.sources.arxiv import arxiv_client
 from src.sources.openalex import openalex_client
@@ -16,6 +13,69 @@ from src.retrieval.bm25 import build_bm25_from_papers
 from src.retrieval.embedding import build_embedding_index
 from src.retrieval.fusion import fuse_results
 from src.retrieval.citation_traversal import expand_with_citations
+from src.step2_critic import critique
+
+logger = logging.getLogger("paper_search.step2")
+
+
+def _retrieve_round(
+    kw_queries: List[str],
+    nl_queries: List[str],
+    time_range: Optional[Dict[str, str]],
+    source_list: List[str],
+    per_source_k: int,
+    pool_size: int,
+    fusion_method: str,
+):
+    """
+    单轮检索：Phase 1 召回 → Phase 2 BM25+Embedding 融合 → Phase 3 引文扩展。
+    返回 (expanded_candidates, all_papers, filtered_papers)。
+    """
+    # ---- Phase 1: Broad Recall ----
+    all_papers: List[Dict[str, Any]] = []
+    seen_ids = set()
+    for source_name in source_list:
+        source_papers = _retrieve_from_source(
+            source_name, kw_queries, nl_queries, per_source_k, time_range
+        )
+        for p in source_papers:
+            pid = p.get("paper_id", "")
+            if pid and pid not in seen_ids:
+                seen_ids.add(pid)
+                all_papers.append(p)
+
+    # ---- Phase 2: BM25 + Embedding 融合 ----
+    if all_papers:
+        bm25 = build_bm25_from_papers(all_papers)
+        emb = build_embedding_index(all_papers)
+        bm25_ranked = []
+        emb_ranked = []
+        for sq in kw_queries[:3]:
+            bm25_ranked.append(bm25.score_and_return(sq, top_k=pool_size))
+        for sq in nl_queries[:2]:
+            emb_ranked.append(emb.search(sq, top_k=pool_size))
+        ranked_lists = bm25_ranked + emb_ranked
+        filtered = fuse_results(ranked_lists, method=fusion_method, top_k=pool_size)
+    else:
+        filtered = []
+
+    # ---- Phase 3: Citation Expansion ----
+    expanded = expand_with_citations(filtered, s2_client)
+    return expanded, all_papers, filtered
+
+
+def _merge_dedup(
+    papers_a: List[Dict[str, Any]], papers_b: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """按 paper_id 去重合并两个论文列表。"""
+    merged = list(papers_a)
+    seen = {p.get("paper_id", "") for p in merged if p.get("paper_id")}
+    for p in papers_b:
+        pid = p.get("paper_id", "")
+        if pid and pid not in seen:
+            seen.add(pid)
+            merged.append(p)
+    return merged
 
 
 def step2_retrieve_all(
@@ -23,20 +83,15 @@ def step2_retrieve_all(
     sources: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Run hybrid retrieval for all parsed queries.
-
-    Args:
-        parsed_queries: Output from step1_process_all()
-        sources: Override source list from config
-
-    Returns:
-        List of dicts: {qid, query, candidates: [...], metadata: {...}}
+    迭代检索：先初始检索，再 Critic 自省检查约束覆盖，针对缺口补检索，循环 N 轮。
     """
     source_list = sources or config.get("retrieval", "sources",
-                                         default=["semantic_scholar", "arxiv", "openalex"])
-    per_source_k = config.get("retrieval", "per_source_top_k", default=50)
+                                         default=["semantic_scholar"])
+    per_source_k = config.get("retrieval", "per_source_top_k", default=100)
     pool_size = config.get("retrieval", "candidate_pool_size", default=200)
     fusion_method = config.get("retrieval", "fusion", "method", default="rrf")
+    iterative_enabled = config.get("retrieval", "iterative", "enabled", default=True)
+    max_rounds = config.get("retrieval", "iterative", "max_rounds", default=3)
 
     results = []
     total = len(parsed_queries)
@@ -49,65 +104,53 @@ def step2_retrieve_all(
         sub_queries = parsed.get("sub_queries", {})
         kw_queries = sub_queries.get("keyword", [query])
         nl_queries = sub_queries.get("nl", [query])
+        constraints = parsed.get("constraints", [])
         time_range = parsed.get("time_range")
 
         logger.info(f"({i+1}/{total}) Retrieving: {qid} (type={qtype})")
 
-        # ---- Phase 1: Broad Recall ----
-        all_papers: List[Dict[str, Any]] = []
-        seen_ids = set()
+        # ---- 第 1 轮：初始检索 ----
+        candidates, all_papers, filtered = _retrieve_round(
+            kw_queries, nl_queries, time_range, source_list,
+            per_source_k, pool_size, fusion_method,
+        )
+        logger.info(f"  Round 1: {len(candidates)} candidates")
 
-        for source_name in source_list:
-            source_papers = _retrieve_from_source(
-                source_name, kw_queries, nl_queries, per_source_k, time_range
-            )
-            for p in source_papers:
-                pid = p.get("paper_id", "")
-                if pid and pid not in seen_ids:
-                    seen_ids.add(pid)
-                    all_papers.append(p)
+        # ---- 迭代检索：Critic 自省 + 补检索 ----
+        used_queries = set(kw_queries + nl_queries)
+        if iterative_enabled and constraints:
+            for round_i in range(1, max_rounds):
+                crit = critique(query, constraints, candidates)
+                verdict = crit.get("verdict", "complete")
+                if verdict == "complete":
+                    logger.info(f"  Round {round_i+1} (critic): coverage complete, stop")
+                    break
 
-        logger.info(f"  Phase 1 (API recall): {len(all_papers)} papers from {len(source_list)} sources")
+                new_queries = [
+                    q for q in crit.get("new_queries", [])
+                    if q and q.strip() and q.strip() not in used_queries
+                ]
+                if not new_queries:
+                    logger.info(f"  Round {round_i+1} (critic): no new queries, stop")
+                    break
 
-        # ---- Phase 2: Local BM25 + Embedding Re-ranking ----
-        if len(all_papers) > 0:
-            # Build local indexes
-            bm25 = build_bm25_from_papers(all_papers)
-            emb = build_embedding_index(all_papers)
+                used_queries.update(q.strip() for q in new_queries)
+                logger.info(f"  Round {round_i+1} (critic): +{len(new_queries)} gap queries -> {new_queries[:2]}")
 
-            # Rank with each sub-query
-            bm25_ranked = []
-            emb_ranked = []
-            for sq in kw_queries[:3]:  # Limit sub-queries for efficiency
-                bm25_ranked.append(bm25.score_and_return(sq, top_k=pool_size))
-            for sq in nl_queries[:2]:
-                emb_ranked.append(emb.search(sq, top_k=pool_size))
-
-            # Fuse results
-            ranked_lists = bm25_ranked + emb_ranked
-            filtered = fuse_results(ranked_lists, method=fusion_method, top_k=pool_size)
-        else:
-            filtered = []
-
-        logger.info(f"  Phase 2 (BM25+Embedding fusion): {len(filtered)} candidates")
-
-        # ---- arxiv_id 补全（对空 arxiv_id 的论文用标题去 arXiv 查询）----
-        max_enrich = config.get("retrieval", "enrich_arxiv_id_max", default=20)
-        enriched = _enrich_arxiv_ids(filtered, max_enrich=max_enrich)
-        if enriched:
-            logger.info(f"  arXiv id enrichment: +{enriched} papers")
-
-        # ---- Phase 3: Citation Expansion ----
-        expanded = expand_with_citations(filtered, s2_client)
-        if len(expanded) > len(filtered):
-            logger.info(f"  Phase 3 (Citation traversal): +{len(expanded) - len(filtered)} papers")
+                new_candidates, new_all, new_filtered = _retrieve_round(
+                    new_queries, [], time_range, source_list,
+                    per_source_k, pool_size, fusion_method,
+                )
+                candidates = _merge_dedup(candidates, new_candidates)
+                all_papers = _merge_dedup(all_papers, new_all)
+                filtered = _merge_dedup(filtered, new_filtered)
+                logger.info(f"  Round {round_i+1}: merged {len(candidates)} candidates")
 
         results.append({
             "qid": qid,
             "query": query,
             "query_type": qtype,
-            "candidates": expanded,
-            # 诊断用：保存各阶段的论文（精简字段）
+            "candidates": candidates,
             "phase1_papers": [
                 {"paper_id": p.get("paper_id", ""), "arxiv_id": p.get("arxiv_id", ""),
                  "title": p.get("title", "")}
@@ -121,7 +164,7 @@ def step2_retrieve_all(
             "metadata": {
                 "api_recall_count": len(all_papers),
                 "after_fusion_count": len(filtered),
-                "after_expansion_count": len(expanded),
+                "after_expansion_count": len(candidates),
                 "sources_used": source_list,
             },
         })
@@ -135,8 +178,7 @@ def _enrich_arxiv_ids(
 ) -> int:
     """
     对 arxiv_id 为空的论文，用标题去 arXiv 查询补全 arxiv_id。
-    遇到 arXiv 限流（429）会抛异常，立即终止避免刷屏。
-    返回成功补全的论文数。
+    遇到 arXiv 限流（429）会抛异常，立即终止避免刷屏。返回成功补全的论文数。
     """
     enriched = 0
     for p in papers:
@@ -165,14 +207,10 @@ def _retrieve_from_source(
     per_source_k: int,
     time_range: Optional[Dict[str, str]],
 ) -> List[Dict[str, Any]]:
-    """
-    Retrieve papers from a single source.
-    Semantic Scholar 支持自然语言语义搜索，用 kw + nl；arXiv/OpenAlex 关键词导向，只用 kw。
-    """
+    """从单个源检索论文。Semantic Scholar 用 kw+nl，其他源只用 kw。"""
     year_start = int(time_range["start"]) if time_range and time_range.get("start") else None
     year_end = int(time_range["end"]) if time_range and time_range.get("end") else None
 
-    # Semantic Scholar 的 search 端点能处理自然语言句子，加入语义召回
     if source_name == "semantic_scholar":
         queries = (kw_queries[:5] + nl_queries[:2])
     else:
@@ -197,10 +235,8 @@ def _retrieve_from_source(
                     year_start=year_start, year_end=year_end,
                 )
             elif source_name == "pubmed":
-                # PubMed client not implemented yet - skip
                 papers = []
             elif source_name == "dblp":
-                # DBLP client not implemented yet - skip
                 papers = []
             else:
                 papers = []

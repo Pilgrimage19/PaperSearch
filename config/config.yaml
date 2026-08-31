@@ -53,10 +53,13 @@ query_understanding:
 # --- Step 2: Hybrid Retrieval ---
 retrieval:
   # Source selection
+  # semantic_scholar：唯一源（覆盖 arXiv 全量 + 引文数据 + externalIds.ArXiv 对齐 GT）
+  # arxiv：已移除（限流严、无引文数据、S2 已覆盖其论文）
+  # openalex：已移除（冗余 + 易限流 + arxiv_id 提取不稳定）
   sources:
     - "semantic_scholar"
-    - "arxiv"
-    - "openalex"
+    # - "arxiv"
+    # - "openalex"
     # - "pubmed"      # Enable for biomedical queries
     # - "dblp"        # Enable for CS venue queries
 
@@ -80,22 +83,32 @@ retrieval:
     rrf_k: 60               # RRF constant
 
   # Retrieval depth
-  per_source_top_k: 50       # Papers to fetch per source per sub-query
-  candidate_pool_size: 200  # Max candidates after fusion
+  per_source_top_k: 30       # 每个源每个子查询取多少篇（降到 30，控制候选规模）
+  candidate_pool_size: 50    # 融合后保留（降到 50，前端展示合理）
 
-  # Citation traversal（前向+后向引文扩展）
+  # 迭代检索（Critic 自省 + 缺口补检索）
+  iterative:
+    enabled: true            # 开启迭代检索
+    max_rounds: 2            # 最多迭代轮数（降到 2，控制调用量与规模）
+
+  # arxiv_id 补全（用标题去 arXiv 查，会触发 arXiv 限流，默认关闭）
+  enrich_arxiv_id: false     # 默认关闭——arxiv_id 已通过去版本号+S2对齐，enrich 价值小且代价大
+
+  # Citation traversal（引文扩展，只做后向 references，学 PaSa）
   citation_traversal:
     enabled: true
-    max_traversal_nodes: 20   # 遍历 top-N 篇论文的引文（原 5）
-    max_new_papers: 50        # 最多新增论文数（原 20）
-    refs_per_paper: 30        # 每篇取多少后向引文（references）
-    cites_per_paper: 30       # 每篇取多少前向引文（citations）
+    max_traversal_nodes: 20   # batch 筛选的候选节点数
+    top_cited_nodes: 5        # 每轮真正遍历的高引论文数（降到 5，控制调用量）
+    traversal_rounds: 1       # 1 轮（回到 47.5% 基线，不靠深度靠迭代补召回）
+    max_new_papers: 50        # 总新增上限（降到 50）
+    refs_per_paper: 20        # 每篇后向引文数（降到 20）
+    cites_per_paper: 0        # 0 = 不做前向引文（调用减半，前向对召回帮助小）
 
   # Rate limiting (requests per second)
   rate_limit:
     semantic_scholar: 0.3    # 1 req per 3 seconds (100/5min limit)
     arxiv: 0.33              # arXiv 官方要求每 3 秒最多 1 请求（原 1.0 太快）
-    openalex: 5.0            # 5 req per second (no rate limit)
+    openalex: 3.0            # 带 mailto 礼貌池可更高，保守用 3 req/s（原 5.0 易 429）
     pubmed: 1.0
     dblp: 2.0
 

@@ -51,6 +51,8 @@ Examples:
                         help="Asta query types to include (can repeat)")
     parser.add_argument("--no-cache", action="store_true",
                         help="Disable result caching")
+    parser.add_argument("--merge-existing", action="store_true",
+                        help="读现有结果，只重跑「有问题」的查询（如 Phase1 召回为空、子查询 fallback），其余保留")
 
     args = parser.parse_args()
 
@@ -78,11 +80,17 @@ Examples:
     print(f"  Cache:        {'OFF' if args.no_cache else 'ON'}")
     print(f"  LLM Model:    {cfg.get('query_understanding', 'model')}")
     print(f"  Sources:      {cfg.get('retrieval', 'sources')}")
+    print(f"  Merge mode:   {'ON' if args.merge_existing else 'OFF'}")
     print("=" * 60)
     print()
 
     # --- Run ---
-    results = run_pipeline(config_path=args.config, steps=args.steps, overrides=overrides or None)
+    results = run_pipeline(
+        config_path=args.config,
+        steps=args.steps,
+        overrides=overrides or None,
+        merge_existing=args.merge_existing,
+    )
 
     # --- Summary ---
     stats = llm_stats.snapshot()

@@ -127,7 +127,19 @@ python run_pipeline.py --dataset asta --query-type semantic --max-queries 10
 
 # 禁用缓存（全新运行）
 python run_pipeline.py --no-cache --max-queries 10
+
+# 增量重跑：只重跑「有问题」的查询，其余保留
+python run_pipeline.py --steps 2 --max-queries 0 --merge-existing
 ```
+
+`--merge-existing` 会读现有结果（`output/stepN_*.json`），判断每条查询是否异常，只重跑异常的：
+
+| 步骤 | 「异常」判定 |
+|------|------|
+| Step 1 | 子查询 fallback（keyword 只有 1 个且 = 原始查询）或为空 |
+| Step 2 | Phase1 召回为空（限流）或 candidates 为空 |
+
+适合跑完全量后发现少量查询因限流/解析失败而不完整，只补跑这几条。
 
 ### 5. 评测
 
